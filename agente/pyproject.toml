@@ -1,0 +1,10 @@
+[project]
+name = "agente-central-de-salas"
+version = "1.0.0"
+description = "Agente A2A (servidor) e host MCP (cliente) da Central de Salas"
+requires-python = ">=3.10"
+dependencies = [
+    "starlette==1.10.0",
+    "uvicorn==0.54.0",
+    "httpx==0.28.1",
+]
