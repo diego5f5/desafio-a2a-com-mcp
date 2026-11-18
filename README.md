@@ -60,8 +60,10 @@ No servidor, o MRTR usa o mecanismo de primeira classe do SDK: o resolver `escol
 
 ## Saída do validador
 
+Execução a partir de um clone limpo, com os dois processos recém-iniciados:
+
 ```text
-trace-id desta execucao: f72f776e7fbaeb263f407641651d2c81
+trace-id desta execucao: c39a550a34dfa00dabd34cdc4bc86000
 procure esse valor no stderr do servidor MCP para conferir a propagacao do traceparent.
 
 PASS 01 tools/list traz as tres tools
