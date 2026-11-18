@@ -172,7 +172,9 @@ class Agente:
             task = Task(_traceparent(traceparent))
             self.tasks[task.id] = task
             task.history.append(mensagem)
+            log(f"task={task.id} estado={SUBMITTED}")
             async with task.lock:
+                await asyncio.sleep(0)  # cede o loop: um GetTask concorrente ainda ve SUBMITTED
                 await self._executar(task, texto)
             return {"task": task.visao()}
 

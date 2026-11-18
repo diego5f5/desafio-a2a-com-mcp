@@ -54,7 +54,8 @@ No servidor, o MRTR usa o mecanismo de primeira classe do SDK: o resolver `escol
 - **Capability:** o SDK devolve `-32021` com `data.requiredCapabilities` e HTTP 400 quando o cliente não declara `elicitation.form`. `_meta` sem `protocolVersion` ou `clientCapabilities` dá `-32602` com HTTP 400.
 - **Stateless:** `stateless_http=True`; nenhum lado infere versão ou capabilities de request anterior. O agente mantém um `httpx.AsyncClient` vivo, que não carrega estado de protocolo.
 - **Estado das Tasks:** em memória no agente (`Agente.tasks`, um dicionário por id), cada Task com o seu próprio `Pausa` e o seu lock. Duas Tasks pausadas ao mesmo tempo nunca trocam de `requestState`. Reservas também ficam em memória no servidor. Não sobrevivem a restart; o `requestState` sobrevive.
-- **Log:** o servidor registra no stderr `[mcp] metodo=... id=... traceparent=...` por request. Requests rejeitados antes do roteamento por falta de `_meta` não passam pelo middleware e aparecem só como erro HTTP.
+- **Log:** um middleware ASGI registra no stderr `[mcp] metodo=... id=... traceparent=...` de todo POST, antes do roteamento, inclusive os rejeitados por falta de `_meta`.
+- **Estados da Task:** a Task nasce em `SUBMITTED`, passa a `WORKING` quando a execução começa e termina em `COMPLETED`, `CANCELED`, `FAILED` ou pausa em `INPUT_REQUIRED`. Cada transição vai para o stderr do agente. O `SendMessage` responde já com o estado alcançado, como nos exemplos de `exemplos/wire`.
 - **Determinismo:** sem LLM; o pedido é parseado por regex e a decisão é por regra.
 
 ## Saída do validador
