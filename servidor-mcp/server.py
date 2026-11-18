@@ -1,6 +1,8 @@
 """Servidor MCP da Central de Salas (Streamable HTTP, porta 7301, endpoint /mcp).
 
-Tres tools e um resource. Conflito de horario ainda e erro de execucao simples.
+Tres tools, um resource e o ciclo MRTR na reserva. O servidor nao guarda nada
+entre o input_required e o retry: o estado viaja no requestState, que o SDK sela
+com AES-256-GCM usando a chave de REQUEST_STATE_SECRET.
 """
 
 from __future__ import annotations
@@ -11,16 +13,29 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
+from mcp.server.elicitation import ElicitationResult
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import BaseModel
+from mcp.server.mcpserver.resolve import Elicit, Resolve
+from mcp.server.request_state import RequestStateSecurity
+from pydantic import BaseModel, Field, create_model
 
 DADOS = Path(os.environ.get("DADOS_DIR", Path(__file__).resolve().parent.parent / "dados"))
 FUSO = timezone(timedelta(hours=-3))
 JANELA_INICIO, JANELA_FIM = 8, 20
 DURACAO_MAXIMA = timedelta(hours=2)
+TTL_REQUEST_STATE = 600.0  # 10 minutos, dentro da faixa de 5 a 30 exigida
+
+# --- chave de integridade: so de variavel de ambiente, nunca do codigo -------------------
+
+segredo = os.environ.get("REQUEST_STATE_SECRET", "")
+if len(segredo.encode()) < 32:
+    sys.exit(
+        "REQUEST_STATE_SECRET ausente ou com menos de 32 bytes. Gere uma com:\n"
+        '  python3 -c "import secrets; print(secrets.token_hex(32))"'
+    )
 
 # --- dados ------------------------------------------------------------------------------
 
@@ -104,6 +119,39 @@ def conflitos(sala: str, ini: datetime, end: datetime) -> list[dict[str, Any]]:
     ]
 
 
+def alternativas(sala: str, ini: datetime, end: datetime) -> list[str]:
+    capacidade = next(s["capacidade"] for s in SALAS if s["id"] == sala)
+    livres = [
+        s
+        for s in SALAS
+        if s["id"] != sala and s["capacidade"] >= capacidade and not conflitos(s["id"], ini, end)
+    ]
+    livres.sort(key=lambda s: (s["capacidade"], s["id"]))
+    return [s["id"] for s in livres[:3]]
+
+
+# --- MRTR: o resolver pergunta, o SDK transforma em input_required ---------------------
+
+
+def escolha_de_sala(sala: str, inicio: str, fim: str) -> Elicit[BaseModel] | None:
+    """Se a sala pedida esta ocupada, pede a escolha de uma alternativa (form mode).
+
+    Nao ha canal de volta: o resolver apenas devolve a pergunta, o SDK encerra a
+    resposta com resultType=input_required e o cliente volta com um request novo.
+    """
+    ini, end = validar(sala, inicio, fim)
+    if not conflitos(sala, ini, end):
+        return None
+    opcoes = alternativas(sala, ini, end)
+    if not opcoes:
+        raise ToolError("Sem alternativas disponiveis no intervalo")
+    esquema = create_model(
+        "EscolhaDeSala",
+        sala=(Literal[tuple(opcoes)], Field(description="Sala alternativa escolhida", title="Sala")),  # type: ignore[valid-type]
+    )
+    return Elicit("A sala pedida esta ocupada nesse intervalo. Escolha uma alternativa.", esquema)
+
+
 # --- servidor ---------------------------------------------------------------------------
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(message)s", force=True)
@@ -122,6 +170,7 @@ async def log_de_requests(ctx: Any, call_next: Any) -> Any:
 mcp = MCPServer(
     "central-de-salas",
     version="1.0.0",
+    request_state_security=RequestStateSecurity(keys=[segredo], ttl=TTL_REQUEST_STATE),
     middleware=[log_de_requests],
 )
 
@@ -151,11 +200,14 @@ def reservar_sala(
     inicio: str,
     fim: str,
     responsavel: str,
+    escolha: Annotated[ElicitationResult[Any], Resolve(escolha_de_sala)],
 ) -> ReservaOut:
-    destino = sala
+    if escolha.action != "accept":  # decline ou cancel: conclui sem reservar, sem erro
+        return ReservaOut(reservado=False, motivo="recusado")
+    destino = escolha.data.sala if escolha.data is not None else sala
     ini, end = validar(destino, inicio, fim)
-    if conflitos(destino, ini, end):
-        raise ToolError("Sala ocupada no intervalo")
+    if conflitos(destino, ini, end):  # defesa: a sala escolhida tambem precisa estar livre
+        raise ToolError("Sem alternativas disponiveis no intervalo")
     nova = {
         "id": f"res-{len(RESERVAS) + 1:04d}",
         "sala": destino,
