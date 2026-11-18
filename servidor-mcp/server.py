@@ -157,21 +157,46 @@ def escolha_de_sala(sala: str, inicio: str, fim: str) -> Elicit[BaseModel] | Non
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(message)s", force=True)
 
 
-async def log_de_requests(ctx: Any, call_next: Any) -> Any:
-    meta = dict(ctx.params.get("_meta") or {}) if ctx.params else {}
-    print(
-        f"[mcp] metodo={ctx.method} id={ctx.request_id} traceparent={meta.get('traceparent')}",
-        file=sys.stderr,
-        flush=True,
-    )
-    return await call_next(ctx)
+class LogDeRequests:
+    """Middleware ASGI: registra no stderr todo POST JSON-RPC, inclusive os que o
+    transporte rejeita por falta de _meta antes de chegarem ao roteamento do MCP."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or scope["method"] != "POST":
+            return await self.app(scope, receive, send)
+        mensagens: list[dict[str, Any]] = []
+        corpo = b""
+        while True:
+            msg = await receive()
+            mensagens.append(msg)
+            if msg["type"] != "http.request":
+                break
+            corpo += msg.get("body", b"")
+            if not msg.get("more_body"):
+                break
+        try:
+            req = json.loads(corpo)
+            meta = (req.get("params") or {}).get("_meta") or {}
+            linha = f"metodo={req.get('method')} id={req.get('id')} traceparent={meta.get('traceparent')}"
+        except (ValueError, AttributeError):
+            linha = "metodo=? id=? traceparent=None (corpo nao e JSON-RPC)"
+        print(f"[mcp] {linha}", file=sys.stderr, flush=True)
+
+        pendentes = iter(mensagens)
+
+        async def replay() -> Any:  # devolve o corpo lido e depois delega ao receive original
+            return next(pendentes, None) or await receive()
+
+        await self.app(scope, replay, send)
 
 
 mcp = MCPServer(
     "central-de-salas",
     version="1.0.0",
     request_state_security=RequestStateSecurity(keys=[segredo], ttl=TTL_REQUEST_STATE),
-    middleware=[log_de_requests],
 )
 
 
@@ -232,10 +257,12 @@ def politica_de_uso() -> str:
 
 
 if __name__ == "__main__":
-    mcp.run(
-        "streamable-http",
+    import uvicorn
+
+    app = LogDeRequests(mcp.streamable_http_app(streamable_http_path="/mcp", stateless_http=True))
+    uvicorn.run(
+        app,
         host=os.environ.get("MCP_HOST", "127.0.0.1"),
         port=int(os.environ.get("MCP_PORT", "7301")),
-        streamable_http_path="/mcp",
-        stateless_http=True,
+        log_level="warning",
     )
